@@ -1,0 +1,16 @@
+# Requirements for GenLayer FactOracle
+# Install with: pip install -r requirements.txt
+
+# Testing
+pytest>=8.0
+pytest-cov>=5.0
+
+# GenLayer SDK (for live testnet interaction)
+# genlayer-sdk>=0.5.0   # uncomment when available on PyPI
+
+# CLI demo utilities
+# (stdlib only — no extra deps needed for dry-run mode)
+
+# Development tools
+black>=24.0
+ruff>=0.4.0
