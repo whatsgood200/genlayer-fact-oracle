@@ -3,31 +3,13 @@
 // REAL genlayer-js SDK integration — no mock data
 // Based on official docs: docs.genlayer.com
 // ============================================================
-// SDK pattern:
-//   import { createClient } from "genlayer-js"
-//   import { testnetBradbury } from "genlayer-js/chains"
-//   import { TransactionStatus } from "genlayer-js/types"
-//
-//   READ:  client.readContract({ address, functionName, args })
-//   WRITE: const hash = await client.writeContract({ address, functionName, args, value })
-//          await client.waitForTransactionReceipt({ hash, status: TransactionStatus.FINALIZED })
-//   METAMASK: createClient({ chain, account: walletAddress })
-//             await client.connect("testnetBradbury")  ← must call before any write
-// ============================================================
 
 import { useState, useCallback, useRef, useEffect } from "react";
 
 // ── Config ─────────────────────────────────────────────────
-// Set these in frontend/.env.local after deploying your contracts:
-//   VITE_ORACLE_ADDRESS=0x...
-//   VITE_MARKET_ADDRESS=0x...
-//   VITE_NETWORK=testnetBradbury
 const ORACLE_ADDRESS  = import.meta.env.VITE_ORACLE_ADDRESS  || "";
 const MARKET_ADDRESS  = import.meta.env.VITE_MARKET_ADDRESS  || "";
 const NETWORK_NAME    = import.meta.env.VITE_NETWORK          || "testnetBradbury";
-
-// Minimum stake matching the contract constant
-const MIN_STAKE_WEI = BigInt(1_000_000);
 
 
 export function useGenLayer() {
@@ -48,7 +30,6 @@ export function useGenLayer() {
   const handleError = useCallback((err, context = "") => {
     console.error(`[GenLayer ${context}]`, err);
     const msg = err?.message || String(err);
-    // Make common errors human-readable
     if (msg.includes("user rejected"))       setError("Transaction cancelled by wallet.");
     else if (msg.includes("insufficient"))   setError("Insufficient balance. Get testnet tokens at faucet.genlayer.com");
     else if (msg.includes("Contract not"))   setError("Contract not found. Check your .env.local addresses.");
@@ -73,44 +54,30 @@ export function useGenLayer() {
   // ── Connect wallet (MetaMask) ─────────────────────────────
   const connect = useCallback(async () => {
     return withLoading(async () => {
-      // Dynamically import the SDK so Vite tree-shakes correctly
-      const { createClient }    = await import("genlayer-js");
-      const chains              = await import("genlayer-js/chains");
-      const { TransactionStatus } = await import("genlayer-js/types");
+      const { createClient }      = await import("genlayer-js");
+      const chains                = await import("genlayer-js/chains");
 
-      // Pick the chain object matching the env variable
       const chain = chains[NETWORK_NAME] || chains.testnetBradbury;
 
-      // Request MetaMask accounts
       if (!window.ethereum) {
         throw new Error("MetaMask not detected. Please install MetaMask.");
       }
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       const walletAddress = accounts[0];
 
-      // Create genlayer-js client using the connected wallet address
-      // The SDK uses MetaMask as the signer automatically when you pass
-      // a wallet address (not a private key)
-      const client = createClient({
-        chain,
-        account: walletAddress,
-      });
-
-      // Switch MetaMask to the correct GenLayer network
-      // This throws if the wallet rejects the network switch
+      const client = createClient({ chain, account: walletAddress });
       await client.connect(NETWORK_NAME);
 
-      // Store refs
       clientRef.current = client;
       setAccount(walletAddress);
       setConnected(true);
 
-      // Load initial data
-      await Promise.all([
-        loadClaims(client),
-        loadStats(client),
-        loadLeaderboard(client),
-      ]);
+      // Stagger reads to avoid rate limiting
+      await loadClaims(client);
+      await new Promise(r => setTimeout(r, 500));
+      await loadStats(client);
+      await new Promise(r => setTimeout(r, 500));
+      await loadLeaderboard(client);
     });
   }, [withLoading]);
 
@@ -122,7 +89,6 @@ export function useGenLayer() {
 
 
   // ── Generic write helper ──────────────────────────────────
-  // Sends tx, waits for FINALIZED, returns receipt
   const writeContract = useCallback(async (
     client, address, functionName, args = [], valueWei = BigInt(0)
   ) => {
@@ -137,13 +103,11 @@ export function useGenLayer() {
         value: valueWei,
       });
 
-      // Wait up to 3 minutes for finalization
-      // resolve_claim can take 1-3 min (validators are fetching web + running AI)
       const receipt = await client.waitForTransactionReceipt({
         hash,
         status: TransactionStatus.FINALIZED,
-        interval: 4_000,   // poll every 4 seconds
-        retries: 45,       // 45 × 4s = 3 min max
+        interval: 5_000,
+        retries: 120,      // 120 × 5s = 10 min max
       });
 
       return receipt;
@@ -159,7 +123,6 @@ export function useGenLayer() {
       const cl = client || clientRef.current;
       if (!cl || !ORACLE_ADDRESS) return;
       const result = await readContract(cl, ORACLE_ADDRESS, "get_all_claims", []);
-      // result is an array of claim dicts returned by the contract
       setClaims(Array.isArray(result) ? result : []);
     } catch (e) {
       handleError(e, "loadClaims");
@@ -196,10 +159,10 @@ export function useGenLayer() {
     ]);
   }, [loadClaims, loadStats]);
 
-  // Auto-refresh every 15 seconds when connected
+  // Auto-refresh every 60 seconds when connected (avoid rate limiting)
   useEffect(() => {
     if (!connected) return;
-    const id = setInterval(refreshClaims, 15_000);
+    const id = setInterval(refreshClaims, 60_000);
     return () => clearInterval(id);
   }, [connected, refreshClaims]);
 
@@ -212,22 +175,14 @@ export function useGenLayer() {
       if (!client) throw new Error("Not connected");
       if (!ORACLE_ADDRESS) throw new Error("VITE_ORACLE_ADDRESS not set in .env.local");
 
-      // stake is passed as number (e.g. 1000000), convert to BigInt wei
-      const stakeWei = BigInt(stake);
-      if (stakeWei < MIN_STAKE_WEI) {
-        throw new Error(`Minimum stake is ${MIN_STAKE_WEI.toString()} wei`);
-      }
-
       const receipt = await writeContract(
         client,
         ORACLE_ADDRESS,
         "submit_claim",
         [text, category, challengePeriod],
-        stakeWei,
+        BigInt(0),  // value always zero — GenLayer doesn't support payable methods yet
       );
 
-      // The contract returns the new claim_id as the result
-      // Refresh to get updated state
       await loadClaims(client);
       return receipt;
     });
@@ -238,22 +193,18 @@ export function useGenLayer() {
       const client = clientRef.current;
       if (!client) throw new Error("Not connected");
 
-      const stakeWei = BigInt(stake);
       await writeContract(
         client,
         ORACLE_ADDRESS,
         "challenge_claim",
         [claimId],
-        stakeWei,
+        BigInt(0),
       );
       await loadClaims(client);
     });
   }, [withLoading, writeContract, loadClaims]);
 
   const resolveClaim = useCallback(async (claimId) => {
-    // NOTE: resolve_claim triggers AI consensus — validators fetch web data
-    // and run AI reasoning. This takes 1-3 minutes on testnet.
-    // The txPending state will be true the entire time.
     return withLoading(async () => {
       const client = clientRef.current;
       if (!client) throw new Error("Not connected");
@@ -318,7 +269,7 @@ export function useGenLayer() {
         MARKET_ADDRESS,
         "place_bet",
         [marketId, position],
-        BigInt(betAmount),
+        BigInt(0),  // bets also zero value for now
       );
     });
   }, [withLoading, writeContract]);
@@ -351,7 +302,6 @@ export function useGenLayer() {
 
 
   return {
-    // State
     account,
     connected,
     claims,
@@ -360,19 +310,13 @@ export function useGenLayer() {
     loading,
     error,
     txPending,
-
-    // Wallet
     connect,
     clearError,
-
-    // Oracle actions
     submitClaim,
     challengeClaim,
     resolveClaim,
     claimPayout,
     refreshClaims,
-
-    // Market actions
     createMarket,
     placeBet,
     resolveMarket,

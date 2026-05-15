@@ -2,7 +2,7 @@
 from genlayer import *
 import json
 
-MIN_BET           = 1_000_000
+MIN_BET           = 0
 PROTOCOL_FEE_BPS  = 200      # 2%
 CONFIDENCE_BONUS  = "0.10"   # stored as str — no floats at module level
 HIGH_CONF         = "0.85"   # stored as str

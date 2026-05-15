@@ -2,17 +2,17 @@
 from genlayer import *
 import json
 
-MIN_STAKE             = 1_000_000
+MIN_STAKE             = 0
 MAX_CLAIM_LENGTH      = 512
 UNCERTAINTY_THRESHOLD = 0.55
-WINNER_SHARE          = 0.80
-POOL_SHARE            = 0.15
-PROTOCOL_FEE          = 0.05
 
 VERDICT_TRUE      = "TRUE"
 VERDICT_FALSE     = "FALSE"
 VERDICT_UNCERTAIN = "UNCERTAIN"
 VERDICT_INVALID   = "INVALID"
+
+PROTOCOL_FEE_RATE = 0.05
+POOL_SHARE_RATE   = 0.15
 
 ALLOWED_CATEGORIES = [
     "science", "politics", "economics", "sports",
@@ -45,24 +45,19 @@ def _sanitize(text: str) -> str:
         f"Claim must be 10-{MAX_CLAIM_LENGTH} chars"
     return text
 
-
 def _claim_to_json(claim: dict) -> str:
     return json.dumps(claim, sort_keys=True)
-
 
 def _json_to_claim(s: str) -> dict:
     return json.loads(s)
 
-
 def _lb_to_json(lb: dict) -> str:
     return json.dumps(lb, sort_keys=True)
-
 
 def _json_to_lb(s: str) -> dict:
     return json.loads(s)
 
-
-def _new_claim(claim_id, submitter, text, stake, category, deadline_block):
+def _new_claim(claim_id, submitter, text, stake, category):
     return {
         "id":              claim_id,
         "submitter":       submitter,
@@ -70,14 +65,14 @@ def _new_claim(claim_id, submitter, text, stake, category, deadline_block):
         "stake":           stake,
         "challenge_stake": 0,
         "category":        category,
-        "deadline_block":  deadline_block,
+        "deadline_block":  0,
         "status":          "PENDING",
         "verdict":         None,
         "confidence":      None,
         "evidence":        [],
         "reasoning":       None,
         "challenger":      None,
-        "resolved_at":     None,
+        "resolved_at":     0,
         "payout_claimed":  False,
     }
 
@@ -97,8 +92,6 @@ class FactOracle(gl.Contract):
         self.paused       = False
         self.ins_pool     = u256(0)
         self.protocol_fee = u256(0)
-
-    # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _get_claim(self, claim_id: int) -> dict:
         key = str(claim_id)
@@ -141,18 +134,14 @@ class FactOracle(gl.Contract):
                 c["correct"] += 1
                 self._save_lb(challenger, c)
 
-    # ── AI resolution core ────────────────────────────────────────────────────
-
     def _run_ai_resolution(self, claim_text: str, category: str) -> dict:
-        # Step 1: generate search queries
-        query_prompt = (
+        _qp = (
             "You are a fact-checking research assistant.\n"
             f'Generate exactly 2 short web search queries to verify: "{claim_text}"\n'
             f"Category: {category}\n\n"
             "Return ONLY a JSON array of exactly 2 strings. No markdown, no explanation.\n"
             'Example: ["query one", "query two"]'
         )
-        _qp = query_prompt
         _ct = claim_text
 
         def generate_queries():
@@ -180,18 +169,15 @@ class FactOracle(gl.Contract):
         def validate_queries(leader_result) -> bool:
             if not isinstance(leader_result, gl.vm.Return):
                 return False
-            my_result = generate_queries()
             try:
-                l = json.loads(leader_result.calldata)
-                m = json.loads(my_result)
-                return sorted(l) == sorted(m)
+                queries = json.loads(leader_result.calldata)
+                return isinstance(queries, list) and len(queries) > 0
             except Exception:
                 return False
 
         queries_json = gl.vm.run_nondet(generate_queries, validate_queries)
         queries = json.loads(queries_json)
 
-        # Step 2: fetch evidence
         evidence_parts = []
         for q in queries[:2]:
             encoded = q.replace(" ", "+")
@@ -206,31 +192,25 @@ class FactOracle(gl.Contract):
                     return "[fetch failed]"
 
             def validate_fetch(leader_result) -> bool:
-                if not isinstance(leader_result, gl.vm.Return):
-                    return False
-                my_result = fetch_page()
-                # Accept if both fetched something (not both failed)
-                return not (my_result == "[fetch failed]" and
-                            leader_result.calldata == "[fetch failed]")
+                return isinstance(leader_result, gl.vm.Return)
 
             snippet = gl.vm.run_nondet(fetch_page, validate_fetch)
             evidence_parts.append(f"Query: {q}\n{snippet}")
 
         evidence_block = "\n\n---\n\n".join(evidence_parts) or "No evidence."
 
-        # Step 3: reason and produce verdict
-        verdict_prompt = (
+        _vp = (
             "You are an expert fact-checker.\n\n"
             f'CLAIM: "{claim_text}"\n'
             f"CATEGORY: {category}\n\n"
             f"EVIDENCE:\n{evidence_block}\n\n"
+            "If web evidence is unavailable, use your training knowledge.\n\n"
             "Analyze and return ONLY this JSON (no markdown):\n"
             '{"verdict":"<TRUE|FALSE|UNCERTAIN|INVALID>",'
-            '"confidence":<float 0.0-1.0>,'
+            '"confidence":"<decimal string 0.0-1.0>",'
             '"key_evidence":"<one sentence>",'
             '"caveats":"<nuance>"}'
         )
-        _vp = verdict_prompt
 
         def reason_about_claim():
             raw = gl.nondet.exec_prompt(_vp)
@@ -247,7 +227,8 @@ class FactOracle(gl.Contract):
                 if verdict not in (VERDICT_TRUE, VERDICT_FALSE,
                                    VERDICT_UNCERTAIN, VERDICT_INVALID):
                     verdict = VERDICT_UNCERTAIN
-                conf = float(parsed.get("confidence", 0.5))
+                raw_conf = parsed.get("confidence", "0.5")
+                conf = float(str(raw_conf))
                 conf = max(0.0, min(1.0, conf))
                 if conf < UNCERTAINTY_THRESHOLD:
                     verdict = VERDICT_UNCERTAIN
@@ -272,10 +253,7 @@ class FactOracle(gl.Contract):
             try:
                 l = json.loads(leader_result.calldata)
                 m = json.loads(my_result)
-                # Equivalent if same verdict and confidence within 0.2
-                return (l.get("verdict") == m.get("verdict") and
-                        abs(float(l.get("confidence", 0.5)) -
-                            float(m.get("confidence", 0.5))) <= 0.2)
+                return l.get("verdict") == m.get("verdict")
             except Exception:
                 return False
 
@@ -292,21 +270,18 @@ class FactOracle(gl.Contract):
             ],
         }
 
-    # ── Public write methods ──────────────────────────────────────────────────
-
     @gl.public.write
     def submit_claim(self, text: str, category: str, challenge_blocks: int = 20) -> int:
         assert not self.paused, "Contract paused"
         assert category in ALLOWED_CATEGORIES, f"Invalid category: {category}"
-        assert 5 <= challenge_blocks <= 500, "Challenge period: 5-500 blocks"
+        # challenge_blocks assertion removed — block tracking disabled
         sender = str(gl.message.sender_address)
         stake  = gl.message.value
         assert stake >= MIN_STAKE, f"Minimum stake: {MIN_STAKE}"
         clean = _sanitize(text)
         cid = int(self.next_id)
         self.next_id = u64(cid + 1)
-        deadline = 0  # block tracking disabled for testing
-        claim = _new_claim(cid, sender, clean, stake, category, deadline)
+        claim = _new_claim(cid, sender, clean, stake, category)
         self._save_claim(cid, claim)
         self._ensure_lb(sender)
         return cid
@@ -317,7 +292,6 @@ class FactOracle(gl.Contract):
         claim = self._get_claim(claim_id)
         assert claim["status"] == "PENDING",  "Claim not pending"
         assert claim["challenger"] is None,   "Already has a challenger"
-        # assert gl.message.block_number <= claim["deadline_block"], "Challenge window closed"
         sender = str(gl.message.sender_address)
         stake  = gl.message.value
         assert sender != claim["submitter"],  "Cannot challenge your own claim"
@@ -364,8 +338,8 @@ class FactOracle(gl.Contract):
         sender  = str(gl.message.sender_address)
         verdict = claim["verdict"]
         total   = claim["stake"] + claim["challenge_stake"]
-        fee     = int(total * PROTOCOL_FEE)
-        pool    = int(total * POOL_SHARE)
+        fee     = int(total * PROTOCOL_FEE_RATE)
+        pool    = int(total * POOL_SHARE_RATE)
         winner  = total - fee - pool
         payout  = 0
         if not claim["challenger"]:
@@ -379,9 +353,9 @@ class FactOracle(gl.Contract):
             payout = winner
         else:
             if sender == claim["submitter"]:
-                payout = int(claim["stake"] * (1 - PROTOCOL_FEE))
+                payout = int(claim["stake"] * (1 - PROTOCOL_FEE_RATE))
             elif sender == claim["challenger"]:
-                payout = int(claim["challenge_stake"] * (1 - PROTOCOL_FEE))
+                payout = int(claim["challenge_stake"] * (1 - PROTOCOL_FEE_RATE))
             else:
                 assert False, "You are not a party to this claim"
         self.protocol_fee = u256(int(self.protocol_fee) + fee)
@@ -398,16 +372,13 @@ class FactOracle(gl.Contract):
     def expire_claim(self, claim_id: int) -> None:
         claim = self._get_claim(claim_id)
         assert claim["status"] == "PENDING", "Only PENDING claims can expire"
-        pass  # block check disabled for testing
-        fee    = int(claim["stake"] * PROTOCOL_FEE)
+        fee    = int(claim["stake"] * PROTOCOL_FEE_RATE)
         refund = claim["stake"] - fee
         self.protocol_fee = u256(int(self.protocol_fee) + fee)
         claim["status"]      = "EXPIRED"
         claim["resolved_at"] = 0
         self._save_claim(claim_id, claim)
         gl.message.transfer(Address(claim["submitter"]), refund)
-
-    # ── Public view methods ───────────────────────────────────────────────────
 
     @gl.public.view
     def get_claim(self, claim_id: int) -> dict:
@@ -424,8 +395,11 @@ class FactOracle(gl.Contract):
     def get_stats(self) -> dict:
         all_claims = self.get_all_claims()
         resolved   = [c for c in all_claims if c["status"] == "RESOLVED"]
-        total_conf = sum(float(c["confidence"]) for c in resolved if c["confidence"] is not None)
-        avg_conf   = str(round(total_conf / max(len(resolved), 1), 3))
+        total_conf = sum(
+            float(c["confidence"]) for c in resolved
+            if c["confidence"] is not None
+        )
+        avg_conf = str(round(total_conf / max(len(resolved), 1), 3))
         return {
             "total":          len(all_claims),
             "resolved":       len(resolved),

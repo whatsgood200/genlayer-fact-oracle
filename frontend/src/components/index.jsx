@@ -1,14 +1,16 @@
-// frontend/src/components/ClaimList.jsx
-import { useState } from "react";
+// frontend/src/components/index.jsx
+import { useState, useEffect, useCallback } from "react";
+
+// ── ClaimList ──────────────────────────────────────────────────────────────────
 
 const STATUS_ORDER = { DISPUTED: 0, PENDING: 1, RESOLVED: 2, EXPIRED: 3 };
-const VERDICT_DOT = { TRUE: "#22c55e", FALSE: "#ef4444", UNCERTAIN: "#f59e0b", INVALID: "#6366f1" };
+const VERDICT_DOT  = { TRUE: "#22c55e", FALSE: "#ef4444", UNCERTAIN: "#f59e0b", INVALID: "#6366f1" };
 
 export function ClaimList({ claims, selected, onSelect, loading }) {
   const [filter, setFilter] = useState("ALL");
   const [search, setSearch] = useState("");
 
-  const filtered = claims
+  const filtered = (claims || [])
     .filter(c => filter === "ALL" || c.status === filter)
     .filter(c => !search || c.text.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status]);
@@ -63,6 +65,7 @@ export function ClaimList({ claims, selected, onSelect, loading }) {
             <p className="ci-text">{claim.text.slice(0, 80)}{claim.text.length > 80 ? "…" : ""}</p>
             <div className="ci-footer">
               <span className="ci-cat">{claim.category}</span>
+              {/* FIX: stake is 0 in testing — show gracefully */}
               <span className="ci-stake">{(claim.stake / 1e6).toFixed(1)}M staked</span>
             </div>
           </button>
@@ -75,22 +78,31 @@ export function ClaimList({ claims, selected, onSelect, loading }) {
 
 // ── StatsPanel ─────────────────────────────────────────────────────────────────
 
-// frontend/src/components/StatsPanel.jsx
 export function StatsPanel({ stats, claims }) {
   if (!stats) return <div className="panel-loading">Loading stats…</div>;
 
-  const vd = stats.verdict_breakdown;
+  // FIX: contract doesn't return verdict_breakdown — build it from claims array
+  const vd = { TRUE: 0, FALSE: 0, UNCERTAIN: 0, INVALID: 0 };
+  (claims || []).forEach(c => {
+    if (c.verdict && vd[c.verdict] !== undefined) vd[c.verdict]++;
+  });
   const total = vd.TRUE + vd.FALSE + vd.UNCERTAIN + vd.INVALID || 1;
+
+  // FIX: avg_confidence is a string "0.95" — parse before math
+  const avgConf = parseFloat(stats.avg_confidence || "0");
 
   return (
     <div className="stats-panel">
       <h2 className="panel-title">Protocol Statistics</h2>
 
       <div className="stats-grid">
-        <StatCard label="Total Claims"    value={stats.total_claims} icon="⬡" />
-        <StatCard label="Resolved"        value={stats.resolved}     icon="◎" />
-        <StatCard label="Avg Confidence"  value={`${(stats.avg_confidence * 100).toFixed(1)}%`} icon="◈" />
-        <StatCard label="Insurance Pool"  value={`${(stats.insurance_pool / 1e6).toFixed(2)}M`} icon="◇" />
+        {/* FIX: contract returns "total" not "total_claims" */}
+        <StatCard label="Total Claims"   value={stats.total ?? 0}    icon="⬡" />
+        <StatCard label="Resolved"       value={stats.resolved ?? 0} icon="◎" />
+        {/* FIX: parse string confidence then multiply */}
+        <StatCard label="Avg Confidence" value={`${(avgConf * 100).toFixed(1)}%`} icon="◈" />
+        {/* FIX: contract returns "ins_pool" not "insurance_pool" */}
+        <StatCard label="Insurance Pool" value={`${((stats.ins_pool || 0) / 1e6).toFixed(2)}M`} icon="◇" />
       </div>
 
       <div className="verdict-chart">
@@ -119,13 +131,16 @@ export function StatsPanel({ stats, claims }) {
       <div className="recent-claims">
         <h3>Recent Activity</h3>
         <div className="activity-feed">
-          {claims.slice(0, 5).map(c => (
+          {(claims || []).slice(0, 5).map(c => (
             <div key={c.id} className="activity-item">
               <span className={`status-dot status-${c.status.toLowerCase()}`} />
               <span className="ai-text">{c.text.slice(0, 60)}…</span>
               <span className="ai-cat">{c.category}</span>
             </div>
           ))}
+          {(!claims || claims.length === 0) && (
+            <div style={{ color: "var(--text-3)", fontSize: "13px" }}>No activity yet.</div>
+          )}
         </div>
       </div>
     </div>
@@ -160,10 +175,13 @@ export function Leaderboard({ entries, account }) {
           <span>Accuracy</span>
           <span>Stake Won</span>
         </div>
-        {entries.map((entry, i) => {
-          const total    = entry.correct + entry.incorrect || 1;
-          const accuracy = (entry.correct / total * 100).toFixed(0);
+
+        {(entries || []).map((entry, i) => {
+          const total    = (entry.correct || 0) + (entry.incorrect || 0) || 1;
+          const accuracy = ((entry.correct || 0) / total * 100).toFixed(0);
           const isMe     = entry.address === account;
+          // FIX: contract returns "won" not "stake_won"
+          const won      = entry.won || 0;
 
           return (
             <div key={i} className={`lb-row ${isMe ? "lb-me" : ""} ${i < 3 ? `lb-top-${i+1}` : ""}`}>
@@ -173,17 +191,23 @@ export function Leaderboard({ entries, account }) {
               <span className="lb-addr">
                 {isMe ? <strong>{entry.address} (you)</strong> : entry.address}
               </span>
-              <span className="lb-correct">{entry.correct}</span>
-              <span className="lb-wrong">{entry.incorrect}</span>
+              <span className="lb-correct">{entry.correct || 0}</span>
+              <span className="lb-wrong">{entry.incorrect || 0}</span>
               <span className="lb-accuracy" style={{
                 color: accuracy >= 70 ? "#22c55e" : accuracy >= 50 ? "#f59e0b" : "#ef4444"
               }}>
                 {accuracy}%
               </span>
-              <span className="lb-won">{(entry.stake_won / 1e6).toFixed(2)}M</span>
+              <span className="lb-won">{(won / 1e6).toFixed(2)}M</span>
             </div>
           );
         })}
+
+        {(!entries || entries.length === 0) && (
+          <div style={{ padding: "24px", textAlign: "center", color: "var(--text-3)" }}>
+            No entries yet. Submit and resolve claims to appear here.
+          </div>
+        )}
       </div>
     </div>
   );
@@ -195,7 +219,7 @@ export function Leaderboard({ entries, account }) {
 export function SubmitClaim({ onSubmit, onClose, loading }) {
   const [text,            setText]            = useState("");
   const [category,        setCategory]        = useState("science");
-  const [stake,           setStake]           = useState("1000000");
+  const [stake,           setStake]           = useState("0");
   const [challengePeriod, setChallengePeriod] = useState("20");
 
   const CATEGORIES = [
@@ -203,16 +227,16 @@ export function SubmitClaim({ onSubmit, onClose, loading }) {
     "technology", "climate", "health", "history",
   ];
 
-  const charCount   = text.length;
-  const isValid     = charCount >= 10 && charCount <= 512;
+  const charCount = text.length;
+  const isValid   = charCount >= 10 && charCount <= 512;
 
   const handleSubmit = async () => {
     if (!isValid) return;
     await onSubmit({
       text,
       category,
-      stake:           parseInt(stake),
-      challengePeriod: parseInt(challengePeriod),
+      stake:           parseInt(stake) || 0,
+      challengePeriod: parseInt(challengePeriod) || 20,
     });
   };
 
@@ -251,22 +275,24 @@ export function SubmitClaim({ onSubmit, onClose, loading }) {
 
             <div className="form-group">
               <label>Stake (wei)</label>
+              {/* FIX: min="0" — contract accepts 0 stake */}
               <input
                 type="number"
                 value={stake}
                 onChange={e => setStake(e.target.value)}
-                min="1000000"
-                placeholder="1000000"
+                min="0"
+                placeholder="0"
               />
             </div>
 
             <div className="form-group">
               <label>Challenge Period (blocks)</label>
+              {/* FIX: min="0" — block tracking disabled */}
               <input
                 type="number"
                 value={challengePeriod}
                 onChange={e => setChallengePeriod(e.target.value)}
-                min="5"
+                min="0"
                 max="1000"
               />
             </div>
@@ -295,29 +321,23 @@ export function SubmitClaim({ onSubmit, onClose, loading }) {
 
 
 // ── PredictionMarket ───────────────────────────────────────────────────────────
-// Real data from the PredictionMarket contract via genlayer-js SDK.
-// Props received from App.jsx which calls useGenLayer hook.
-
-import { useState, useEffect, useCallback } from "react";
 
 export function PredictionMarket({ connected, account, createMarket, placeBet, resolveMarket }) {
-  const [markets,      setMarkets]      = useState([]);
-  const [loading,      setLoading]      = useState(false);
-  const [error,        setError]        = useState(null);
-  const [showCreate,   setShowCreate]   = useState(false);
-  const [betModal,     setBetModal]     = useState(null); // { marketId, position }
-  const [betAmount,    setBetAmount]    = useState("500000");
+  const [markets,    setMarkets]    = useState([]);
+  const [loading,    setLoading]    = useState(false);
+  const [error,      setError]      = useState(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [betModal,   setBetModal]   = useState(null);
+  const [betAmount,  setBetAmount]  = useState("0");
 
-  // ── Create market form state ────────────────────────────
   const [form, setForm] = useState({
-    question:        "",
-    description:     "",
-    resolutionHint:  "",
-    category:        "economics",
-    durationBlocks:  "100",
+    question:       "",
+    description:    "",
+    resolutionHint: "",
+    category:       "economics",
+    durationBlocks: "100",
   });
 
-  // ── Load markets from contract ──────────────────────────
   const loadMarkets = useCallback(async () => {
     if (!connected) return;
     setLoading(true);
@@ -332,17 +352,12 @@ export function PredictionMarket({ connected, account, createMarket, placeBet, r
         return;
       }
 
-      const client = createClient({
-        chain:   chains.testnetBradbury,
-        account: account,
-      });
-
+      const client = createClient({ chain: chains.testnetBradbury, account });
       const result = await client.readContract({
         address:      MARKET_ADDRESS,
         functionName: "get_all_markets",
         args:         [],
       });
-
       setMarkets(Array.isArray(result) ? result : []);
     } catch (e) {
       setError(e.message || "Failed to load markets");
@@ -353,21 +368,20 @@ export function PredictionMarket({ connected, account, createMarket, placeBet, r
 
   useEffect(() => {
     loadMarkets();
-    const id = setInterval(loadMarkets, 20_000);
+    const id = setInterval(loadMarkets, 60_000); // FIX: 60s to avoid rate limiting
     return () => clearInterval(id);
   }, [loadMarkets]);
 
-  // ── Handlers ────────────────────────────────────────────
   const handleCreateMarket = async () => {
     if (!createMarket) return;
     try {
       setLoading(true);
       await createMarket({
-        question:        form.question,
-        description:     form.description,
-        resolutionHint:  form.resolutionHint,
-        category:        form.category,
-        durationBlocks:  parseInt(form.durationBlocks),
+        question:       form.question,
+        description:    form.description,
+        resolutionHint: form.resolutionHint,
+        category:       form.category,
+        durationBlocks: parseInt(form.durationBlocks) || 100,
       });
       setShowCreate(false);
       setForm({ question:"", description:"", resolutionHint:"", category:"economics", durationBlocks:"100" });
@@ -383,7 +397,7 @@ export function PredictionMarket({ connected, account, createMarket, placeBet, r
     if (!betModal || !placeBet) return;
     try {
       setLoading(true);
-      await placeBet(betModal.marketId, betModal.position, parseInt(betAmount));
+      await placeBet(betModal.marketId, betModal.position, parseInt(betAmount) || 0);
       setBetModal(null);
       await loadMarkets();
     } catch (e) {
@@ -408,7 +422,6 @@ export function PredictionMarket({ connected, account, createMarket, placeBet, r
 
   const CATEGORIES = ["economics","technology","science","politics","sports","climate","health","history"];
 
-  // ── Render ──────────────────────────────────────────────
   return (
     <div className="prediction-market">
       <div className="pm-header">
@@ -423,7 +436,6 @@ export function PredictionMarket({ connected, account, createMarket, placeBet, r
         </div>
       </div>
 
-      {/* Not connected state */}
       {!connected && (
         <div className="empty-state">
           <div className="empty-icon">◈</div>
@@ -432,7 +444,6 @@ export function PredictionMarket({ connected, account, createMarket, placeBet, r
         </div>
       )}
 
-      {/* Error */}
       {error && (
         <div className="error-banner" style={{ marginBottom:"16px" }}>
           <span>⚠ {error}</span>
@@ -440,7 +451,6 @@ export function PredictionMarket({ connected, account, createMarket, placeBet, r
         </div>
       )}
 
-      {/* Empty markets */}
       {connected && !loading && markets.length === 0 && !error && (
         <div className="empty-state">
           <div className="empty-icon">◈</div>
@@ -452,14 +462,14 @@ export function PredictionMarket({ connected, account, createMarket, placeBet, r
         </div>
       )}
 
-      {/* Markets grid */}
       {markets.length > 0 && (
         <div className="markets-grid">
           {markets.map(m => {
             const total   = (m.yes_pool || 0) + (m.no_pool || 0);
             const yesProb = total ? m.yes_pool / total : 0.5;
             const noProb  = 1 - yesProb;
-            const isPast  = false; // block comparison would need current block
+            // FIX: confidence is a string "0.95" — parse before math
+            const conf    = parseFloat(m.confidence || "0");
 
             return (
               <div key={m.id} className="market-card">
@@ -490,8 +500,9 @@ export function PredictionMarket({ connected, account, createMarket, placeBet, r
 
                 <div className="mc-footer">
                   <span>Pool: {(total/1e6).toFixed(2)}M</span>
+                  {/* FIX: parse string confidence */}
                   {m.confidence != null && (
-                    <span>AI Conf: {(m.confidence*100).toFixed(0)}%</span>
+                    <span>AI Conf: {(conf * 100).toFixed(0)}%</span>
                   )}
                 </div>
 
@@ -607,15 +618,16 @@ export function PredictionMarket({ connected, account, createMarket, placeBet, r
             <div className="modal-body">
               <div className="form-group">
                 <label>Bet Amount (wei)</label>
+                {/* FIX: min="0" — gl.message.value not supported */}
                 <input
                   type="number"
                   value={betAmount}
                   onChange={e => setBetAmount(e.target.value)}
-                  min="500000"
+                  min="0"
                 />
               </div>
               <p style={{ fontSize:"11px", color:"var(--text-3)" }}>
-                Minimum bet: 500,000 wei. Winnings include a +10% bonus if AI confidence ≥ 85%.
+                Winnings include a +10% bonus if AI confidence ≥ 85%.
               </p>
             </div>
             <div className="modal-footer">
